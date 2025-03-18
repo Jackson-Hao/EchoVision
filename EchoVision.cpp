@@ -5,6 +5,7 @@
 #include <condition_variable>
 #include "GNSS.h"
 #include "ONNX.h"
+#include "LiveStream.h"
 
 #define VISUAL
 
@@ -20,7 +21,7 @@ std::mutex mtx;
 std::condition_variable con_cv;
 HAL::UART::Config config;
 HAL::UART::Uart uart;
-ONNX::YOLO yolo(YOLO_MODEL_PATH, COCO_YAML_PATH);
+
 
 namespace HW {
     static void HardwareInit() {
@@ -43,19 +44,21 @@ namespace HW {
     }
 }
 
-namespace Console{
+namespace Console {
     static void consoleService() {
         while (true) {
             char key;
-            std::cout<< "Press 's' to take snapshot, 'v' to start recording a 10s video, 'q' to quit." << std::endl;
+            std::cout << "Press 's' to take snapshot, 'v' to start recording a 10s video, 'q' to quit." << std::endl;
             std::cin >> key;
             if (key == 'q') {
                 exit(0);
-            } else if (key == 's') {
+            }
+            else if (key == 's') {
                 std::lock_guard<std::mutex> lock(mtx);
                 shouldTakeSnapshot = true;
                 con_cv.notify_one();
-            } else if (key == 'v') {
+            }
+            else if (key == 'v') {
                 std::lock_guard<std::mutex> lock(mtx);
                 shouldStartRecording = true;
                 con_cv.notify_one();
@@ -66,7 +69,8 @@ namespace Console{
 
 #ifdef __VISUAL
 namespace VS {
-    static void displayVideo(const cv::Mat & frame) {
+    ONNX::YOLO yolo(YOLO_MODEL_PATH, COCO_YAML_PATH);
+    static void displayVideo(const cv::Mat& frame) {
         // 分割帧为左右两部分
         cv::Mat leftFrame = frame(cv::Rect(0, 0, CAM_WIDTH / 2, CAM_HEIGHT));
         cv::Mat rightFrame = frame(cv::Rect(CAM_WIDTH / 2, 0, CAM_WIDTH / 2, CAM_HEIGHT));
@@ -84,8 +88,8 @@ namespace VS {
 }
 #endif
 
-namespace Camera{
-    void handleSnapshot(DualLensCamera& cam, int &counter, std::mutex& mtx) {
+namespace Camera {
+    void handleSnapshot(DualLensCamera& cam, int& counter, std::mutex& mtx) {
         std::lock_guard<std::mutex> lock(mtx);
         if (shouldTakeSnapshot) {
             cam.takeSnapshot("./SaveImage/", counter);
@@ -93,7 +97,7 @@ namespace Camera{
         }
     }
 
-    bool startRecording(DualLensCamera& cam,int& counter ,bool &recordingStarted, std::mutex& mtx) {
+    bool startRecording(DualLensCamera& cam, int& counter, bool& recordingStarted, std::mutex& mtx) {
         std::lock_guard<std::mutex> lock(mtx);
         if (shouldStartRecording && !recordingStarted) {
             cam.startRecording("./SaveVideo/", counter); // 计数器在这里总是从0开始
@@ -114,7 +118,6 @@ namespace Camera{
 
             cv::Mat frame;
             if (!cam.readFrame(frame)) break; // 如果无法读取帧，则退出
-
             cv::Mat left_frame = frame(cv::Rect(0, 0, CAM_WIDTH / 2, CAM_HEIGHT));
             cv::Mat right_frame = frame(cv::Rect(CAM_WIDTH / 2, 0, CAM_WIDTH / 2, CAM_HEIGHT));
 
@@ -122,7 +125,6 @@ namespace Camera{
 
             cv::resize(left_frame, resized_left, cv::Size(CAM_WIDTH / 4, CAM_HEIGHT / 2));
             cv::resize(right_frame, resized_right, cv::Size(CAM_WIDTH / 4, CAM_HEIGHT / 2));
-
             // cam.writer_left.write(left_frame);
             // cam.writer_right.write(right_frame);
             cv::Mat merge_frame;
@@ -150,13 +152,25 @@ namespace Camera{
         bool recordingStarted = false;
         std::mutex mtx;
 
+#ifndef __STREAM
+        LIVE::Streamer streamer("rtsp://127.0.0.1/camera_test", 1280, 720, 30);
+        if (!streamer.init()) {
+            std::cerr << "Failed to initialize streamer." << std::endl;
+            return EXIT_FAILURE;
+        }
+#endif
         while (true) {
             cv::Mat frame;
             if (!cam.readFrame(frame)) break;
             handleSnapshot(cam, counter, mtx);
-    #ifdef __VISUAL
+#ifdef __VISUAL
             VS::displayVideo(frame);
-    #endif
+#endif
+#ifndef __STREAM
+            // 这里可以添加推流代码
+            streamer.pushFrame(frame);
+#endif
+
             if (startRecording(cam, counter, recordingStarted, mtx)) {
                 constexpr int totalFrames = 300;
                 processRecording(cam, totalFrames);
@@ -169,15 +183,11 @@ namespace Camera{
 
 static void IoTMainTaskEntry() {
     // HW::HardwareInit();
-
     std::thread threadConsole(Console::consoleService);
     std::thread threadCamera(Camera::cameraService);
-
     // HW::HardwareService();
-
     threadConsole.join();
     threadCamera.join();
-
 }
 
 APP_SERVICE_INIT(IoTMainTaskEntry);

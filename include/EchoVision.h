@@ -2,7 +2,7 @@
 #define MAIN_H
 
 #ifdef __X86_64
-#define CAM_ID 0
+#define CAM_ID 2
 #define __VISUAL
 
 #else   // AARCH64

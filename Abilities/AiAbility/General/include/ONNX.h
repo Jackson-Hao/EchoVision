@@ -47,8 +47,8 @@ namespace ONNX {
         int _batchSize = 1; //if multi-batch,set this
         bool _isDynamicShape = true;   //onnx 支持动态shape
         float _classThreshold = CLASS_THERESHOLD;   // 置信度
-        float _nmsThreshold= 0.45;
-        float _maskThreshold = 0.5;
+        float _nmsThreshold= 0.45;  // nms阈值
+        float _maskThreshold = 0.5; // mask阈值
 
         Ort::Env _OrtEnv = Ort::Env(ORT_LOGGING_LEVEL_ERROR, "Yolov11n");
         Ort::SessionOptions _OrtSessionOptions = Ort::SessionOptions();

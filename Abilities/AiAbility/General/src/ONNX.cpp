@@ -42,7 +42,7 @@ bool ONNX::YOLO::ReadModel(const std::string &modelPath){
     try {
         std::vector<std::string> available_providers = Ort::GetAvailableProviders();
         //设置内部线程
-        _OrtSessionOptions.SetIntraOpNumThreads(8);
+        // _OrtSessionOptions.SetIntraOpNumThreads(1);
         // 开启图像优化
         _OrtSessionOptions.SetGraphOptimizationLevel(ORT_ENABLE_EXTENDED);
         _OrtSession = new Ort::Session(_OrtEnv, modelPath.c_str(), _OrtSessionOptions);

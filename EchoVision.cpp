@@ -1,27 +1,30 @@
 #include "EchoVision.h"
 #include "DualLensCamera.h"
 #include "HAL_UART.h"
-#include <mutex>
+
 #include <condition_variable>
 #include "GNSS.h"
 #include "ONNX.h"
 #include "LiveStream.h"
+#include <thread>
+#include <queue>
+#include <mutex>
+
+std::queue<cv::Mat> frameQueue;
+std::mutex queueMutex;
+std::condition_variable queueCV;
+bool stopThreads = false;
 
 #define VISUAL
 
 #define CONFIDENCE_THRESHOLD 0.35
 #define IOU_THRESHOLD 0.45
 
-
 std::string COCO_YAML_PATH = "./coco8.yaml";
 std::string YOLO_MODEL_PATH = "./yolo11n_dynamic.onnx";
-bool shouldTakeSnapshot = false;
-bool shouldStartRecording = false;
-std::mutex mtx;
-std::condition_variable con_cv;
+
 HAL::UART::Config config;
 HAL::UART::Uart uart;
-
 
 namespace HW {
     static void HardwareInit() {
@@ -41,29 +44,6 @@ namespace HW {
     static void HardwareService() {
         GNSS::Location gnss;
         gnss.locationService(uart);
-    }
-}
-
-namespace Console {
-    static void consoleService() {
-        while (true) {
-            char key;
-            std::cout << "Press 's' to take snapshot, 'v' to start recording a 10s video, 'q' to quit." << std::endl;
-            std::cin >> key;
-            if (key == 'q') {
-                exit(0);
-            }
-            else if (key == 's') {
-                std::lock_guard<std::mutex> lock(mtx);
-                shouldTakeSnapshot = true;
-                con_cv.notify_one();
-            }
-            else if (key == 'v') {
-                std::lock_guard<std::mutex> lock(mtx);
-                shouldStartRecording = true;
-                con_cv.notify_one();
-            }
-        }
     }
 }
 
@@ -89,105 +69,118 @@ namespace VS {
 #endif
 
 namespace Camera {
-    void handleSnapshot(DualLensCamera& cam, int& counter, std::mutex& mtx) {
-        std::lock_guard<std::mutex> lock(mtx);
-        if (shouldTakeSnapshot) {
-            cam.takeSnapshot("./SaveImage/", counter);
-            shouldTakeSnapshot = false;
-        }
-    }
-
-    bool startRecording(DualLensCamera& cam, int& counter, bool& recordingStarted, std::mutex& mtx) {
-        std::lock_guard<std::mutex> lock(mtx);
-        if (shouldStartRecording && !recordingStarted) {
-            cam.startRecording("./SaveVideo/", counter); // 计数器在这里总是从0开始
-            recordingStarted = true;
-            shouldStartRecording = false;
-            std::cout << "Recording started." << std::endl;
-            counter++;
-            return true;
-        }
-        return false;
-    }
-
-    void processRecording(DualLensCamera& cam, const int totalFrames) {
-        int counter = 0;
-        // auto start = std::chrono::steady_clock::now();
-        while (counter < totalFrames) {
-            //auto frameStart = std::chrono::steady_clock::now();
-
-            cv::Mat frame;
-            if (!cam.readFrame(frame)) break; // 如果无法读取帧，则退出
-            cv::Mat left_frame = frame(cv::Rect(0, 0, CAM_WIDTH / 2, CAM_HEIGHT));
-            cv::Mat right_frame = frame(cv::Rect(CAM_WIDTH / 2, 0, CAM_WIDTH / 2, CAM_HEIGHT));
-
-            cv::Mat resized_left, resized_right;
-
-            cv::resize(left_frame, resized_left, cv::Size(CAM_WIDTH / 4, CAM_HEIGHT / 2));
-            cv::resize(right_frame, resized_right, cv::Size(CAM_WIDTH / 4, CAM_HEIGHT / 2));
-            // cam.writer_left.write(left_frame);
-            // cam.writer_right.write(right_frame);
-            cv::Mat merge_frame;
-            cv::hconcat(resized_left, resized_right, merge_frame);
-            cam.writer_merge.write(merge_frame);
-            counter++;
-        }
-
-        cam.stopRecording();
-        std::cout << "Video recording completed after writing " << counter << " frames." << std::endl;
-    }
-
-    static int cameraService() {
+    static DualLensCamera CameraServiceInit() {
         DualLensCamera cam(CAM_ID, CAM_WIDTH, CAM_HEIGHT, CAM_FPS);
 
         if (!cam.isTrueCamera(CAM_WIDTH, CAM_HEIGHT)) {
             std::cerr << "Camera initialization failed: Invalid camera settings." << std::endl;
-            return EXIT_FAILURE;
+            exit(EXIT_FAILURE);
         }
+        return cam;
+    }
 
+    static int cameraService(const cv::Mat& frame) {
         DualLensCamera::makeShotFolder(PICTURE_DIR);
         DualLensCamera::makeShotFolder(VIDEO_DIR);
-
-        int counter = 0;
-        bool recordingStarted = false;
-        std::mutex mtx;
-
-#ifndef __STREAM
-        LIVE::Streamer streamer("rtsp://127.0.0.1/camera_test", 1280, 720, 30);
-        if (!streamer.init()) {
-            std::cerr << "Failed to initialize streamer." << std::endl;
-            return EXIT_FAILURE;
-        }
-#endif
-        while (true) {
-            cv::Mat frame;
-            if (!cam.readFrame(frame)) break;
-            handleSnapshot(cam, counter, mtx);
-#ifdef __VISUAL
-            VS::displayVideo(frame);
-#endif
-#ifndef __STREAM
-            // 这里可以添加推流代码
-            streamer.pushFrame(frame);
-#endif
-
-            if (startRecording(cam, counter, recordingStarted, mtx)) {
-                constexpr int totalFrames = 300;
-                processRecording(cam, totalFrames);
-                recordingStarted = false; // Reset the flag after finishing recording
-            }
-        }
+        VS::displayVideo(frame);
         return EXIT_SUCCESS;
     }
 }
 
+namespace Stream {
+    static cv::Mat CutFrame(const cv::Mat &frame) {
+        cv::Mat right_frame = frame(cv::Rect(CAM_WIDTH / 2, 0, CAM_WIDTH / 2, CAM_HEIGHT));
+        cv::Mat resized_right;
+        cv::resize(right_frame, resized_right, cv::Size(1280, 720));
+        return resized_right;    // 返回大小为1280x720的右侧图像
+    }
+
+    static LIVE::Streamer StreamServiceInit(const std::string& rtsp_url, int width, int height, int fps) {
+        LIVE::Streamer streamer(rtsp_url, width, height, fps);
+        if (!streamer.init()) {
+            std::cerr << "Failed to initialize streamer." << std::endl;
+            exit(EXIT_FAILURE);
+        }
+        return streamer;
+    }
+
+    static int StreamService(LIVE::Streamer& streamer , const cv::Mat &frame) {
+        cv::Mat frame1 = CutFrame(frame);
+        streamer.pushFrame(frame1);
+        return EXIT_SUCCESS;
+    }
+}
+
+
+static void captureFrames(DualLensCamera &cam) {
+    while (!stopThreads) {
+        cv::Mat frame;
+        if (!cam.readFrame(frame)) {
+            std::cerr << "Failed to read frame from camera." << std::endl;
+            break;
+        }
+
+        // 将帧加入共享队列
+        {
+            std::lock_guard<std::mutex> lock(queueMutex);
+            frameQueue.push(frame);
+        }
+        queueCV.notify_all();
+    }
+}
+
+static void displayFrames() {
+    while (!stopThreads) {
+        cv::Mat frame;
+
+        // 从队列中取出帧用于显示
+        {
+            std::unique_lock<std::mutex> lock(queueMutex);
+            queueCV.wait(lock, [] { return !frameQueue.empty() || stopThreads; });
+
+            if (stopThreads && frameQueue.empty()) break;
+
+            frame = frameQueue.front();
+            frameQueue.pop();
+        }
+
+        // 显示帧
+        Camera::cameraService(frame);
+    }
+}
+
+static void streamFrames(LIVE::Streamer& streamer) {
+    while (!stopThreads) {
+        cv::Mat frame;
+
+        // 从队列中取出帧用于传输
+        {
+            std::unique_lock<std::mutex> lock(queueMutex);
+            queueCV.wait(lock, [] { return !frameQueue.empty() || stopThreads; });
+
+            if (stopThreads && frameQueue.empty()) break;
+
+            frame = frameQueue.front();
+            frameQueue.pop();
+        }
+
+        // 传输视频帧
+        Stream::StreamService(streamer, frame);
+    }
+}
+
+
 static void IoTMainTaskEntry() {
-    // HW::HardwareInit();
-    std::thread threadConsole(Console::consoleService);
-    std::thread threadCamera(Camera::cameraService);
-    // HW::HardwareService();
-    threadConsole.join();
-    threadCamera.join();
+    auto cam = Camera::CameraServiceInit();
+    auto streamer = Stream::StreamServiceInit("rtsp://127.0.0.1:8554/camera_test", 1280, 720, 30);
+    // 创建捕获线程、显示线程和传输线程
+    std::thread captureThread(captureFrames, std::ref(cam));
+    std::thread displayThread(displayFrames);
+    std::thread streamThread(streamFrames, std::ref(streamer));
+
+    captureThread.join();
+    displayThread.join();
+    streamThread.join();
 }
 
 APP_SERVICE_INIT(IoTMainTaskEntry);

@@ -24,6 +24,7 @@ if(CMAKE_BUILD_TYPE STREQUAL "x86_64")
 
     # 包含 FFmpeg 的头文件路径
     include_directories(${FFMPEG_INCLUDE_DIRS})
+    set(FFMPEG_LIBS ${FFMPEG_LIBRARIES})
 elseif(CMAKE_BUILD_TYPE STREQUAL "aarch64")
     # 对于aarch64, 使用指定路径下的OpenCV库
     add_compile_definitions(__AARCH64__)
@@ -77,7 +78,12 @@ add_executable(EchoVision
         Abilities/StreamAbility/include/LiveStream.h
 )
 if(CMAKE_BUILD_TYPE STREQUAL "x86_64")
-    target_link_libraries(EchoVision ${OpenCV_LIBS} ${ONNXRUNTIME_LIBS} yaml-cpp::yaml-cpp)
+    target_link_libraries(EchoVision
+            ${OpenCV_LIBS}
+            ${ONNXRUNTIME_LIBS}
+            yaml-cpp::yaml-cpp
+            ${FFMPEG_LIBS}  # 添加FFmpeg库到这里
+    )
 elseif(CMAKE_BUILD_TYPE STREQUAL "aarch64")
     target_link_libraries(EchoVision ${OpenCV_LIBS} yaml-cpp::yaml-cpp)
 endif()

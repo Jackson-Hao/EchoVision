@@ -1,5 +1,6 @@
 #include "LiveStream.h"
 #include <iostream>
+#include <thread>
 
 namespace LIVE {
 
@@ -42,10 +43,19 @@ bool Streamer::init() {
     codec_context->time_base = {1, fps};
     codec_context->framerate = {fps, 1};
     codec_context->pix_fmt = AV_PIX_FMT_YUV420P;
+    codec_context->bit_rate = 500 * 1000;
+    codec_context->gop_size = 25;
+    codec_context->max_b_frames = 1;
+    codec_context->thread_count = std::thread::hardware_concurrency();
+    codec_context->thread_type = FF_THREAD_SLICE;
 
     if (output_context->oformat->flags & AVFMT_GLOBALHEADER) {
         codec_context->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
     }
+
+    av_opt_set(codec_context->priv_data, "preset", "fast", 0);
+    av_opt_set(codec_context->priv_data, "tune", "zerolatency", 0);
+    av_opt_set(codec_context->priv_data, "profile", "baseline", 0);
 
     if (avcodec_open2(codec_context, codec, nullptr) < 0) {
         std::cerr << "无法打开编码器！" << std::endl;
@@ -84,9 +94,28 @@ bool Streamer::init() {
 }
 
 void Streamer::pushFrame(const cv::Mat& frame) {
-    if (frame.empty() || frame.cols != width || frame.rows != height) {
-        std::cerr << "输入的帧无效或尺寸不匹配！" << std::endl;
-        return;
+    if (frame.empty()) {
+        std::cout << "空帧，无法推送！" << std::endl;
+    } else if (frame.channels() == 1) {
+        std::cout << "单通道图像，无法推送！" << std::endl;
+    }
+    else if (frame.type() != CV_8UC3) {
+        std::cout << "图像格式不支持，无法推送！" << std::endl;
+    }
+    else if (frame.size() != cv::Size(width, height)) {
+        std::cout << "图像尺寸不匹配，无法推送！" << std::endl;
+    }
+    else if (av_frame == nullptr) {
+        std::cout << "帧未初始化，无法推送！" << std::endl;
+    }
+    else if (sws_context == nullptr) {
+        std::cout << "像素格式转换上下文未初始化，无法推送！" << std::endl;
+    }
+    else if (codec_context == nullptr) {
+        std::cout << "编码器上下文未初始化，无法推送！" << std::endl;
+    }
+    else if (output_context == nullptr) {
+        std::cout << "输出上下文未初始化，无法推送！" << std::endl;
     }
 
     uint8_t* src_data[1] = { frame.data };
